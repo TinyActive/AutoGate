@@ -1,0 +1,41 @@
+# Psiphon egress container for AutoGate.
+# Builds the Psiphon ConsoleClient from source, then runs it as a local
+# HTTP/SOCKS proxy that HAProxy can use as one more rotating egress path
+# (similar role to the WARP and ProxyBroker2 backends).
+
+ARG GO_VERSION=1.24.1
+ARG PSIPHON_VERSION=v2.0.38
+
+FROM golang:${GO_VERSION}-bookworm AS builder
+ARG PSIPHON_VERSION
+WORKDIR /build
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sL "https://github.com/Psiphon-Labs/psiphon-tunnel-core/archive/refs/tags/${PSIPHON_VERSION}.tar.gz" \
+    | tar xz --strip-components=1 -C /build
+
+WORKDIR /build/ConsoleClient
+ENV CGO_ENABLED=0
+RUN go build -a -tags netgo -ldflags "-s -w -extldflags '-static'" -o /psiphon-tunnel-core
+
+FROM alpine:3.20
+EXPOSE 8080 1080
+
+RUN apk --no-cache add ca-certificates curl jq
+
+COPY --from=builder /psiphon-tunnel-core /usr/local/bin/psiphon
+COPY psiphon/psiphon.config /psiphon/psiphon.config
+COPY psiphon/run.sh /psiphon/run.sh
+COPY psiphon/healthcheck.sh /psiphon/healthcheck.sh
+RUN chmod +x /psiphon/run.sh /psiphon/healthcheck.sh /usr/local/bin/psiphon
+
+# Tunnel establishment can take a while, so allow a generous start period before
+# the container is considered unhealthy. The check tunnels a real request
+# through the local proxy to confirm egress works (not just that the port is open).
+HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=3 \
+    CMD /psiphon/healthcheck.sh
+
+CMD ["/psiphon/run.sh"]

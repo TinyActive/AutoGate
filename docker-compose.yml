@@ -17,6 +17,7 @@ services:
         links:
             - warp:warp
             - proxy001:proxy001
+            - psiphon001:psiphon001
             - ovpn_proxy_00:vpn00
             - ovpn_proxy_01:vpn01
             - ovpn_proxy_02:vpn02
@@ -70,6 +71,37 @@ services:
                 max-size: "10m"
                 max-file: "1"
   
+    psiphon001:
+        build:
+            context: .
+            dockerfile: PsiphonDockerfile
+        image: psiphonimg
+        container_name: psiphon001
+        hostname: psiphon001
+        restart: always
+        environment:
+            # Leave empty for fastest/any region. Set e.g. SG, JP, US to pin egress geo.
+            - EGRESS_REGION=
+            # Optional: auto-fetch a fresh psiphon config from this URL on start
+            # and on each refresh. Empty = always use the bundled standard config.
+            # Invalid/unreachable downloads automatically fall back to standard.
+            - CONFIG_URL=https://raw.githubusercontent.com/swarupsengupta2007/psiphon-docker/master/assets/psiphon.config
+            # Seconds between config re-checks when CONFIG_URL is set (0 = off).
+            # On change, Psiphon restarts (restart: always) to apply it.
+            - CONFIG_REFRESH_INTERVAL=21600
+            # URL the healthcheck fetches THROUGH the Psiphon proxy to prove egress.
+            - HEALTHCHECK_URL=https://ifconfig.io/ip
+        volumes:
+            - ./psiphon_data:/psiphon/data
+        networks:
+            custom_network:
+                ipv4_address: 172.21.0.132
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10m"
+                max-file: "1"
+
     proxy001:
         image: bluet/proxybroker2:v2.0.0-alpha6
         container_name: proxy001

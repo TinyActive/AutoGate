@@ -1,6 +1,6 @@
 # AutoGate
 
-AutoGate is a Docker-based **rotating proxy gateway** that aggregates multiple outbound paths—VPN (OpenVPN via VPNGate), Cloudflare WARP, and public HTTP/HTTPS proxies—and exposes them through a single HAProxy entry point with automatic rotation.
+AutoGate is a Docker-based **rotating proxy gateway** that aggregates multiple outbound paths—VPN (OpenVPN via VPNGate), Cloudflare WARP, Psiphon, and public HTTP/HTTPS proxies—and exposes them through a single HAProxy entry point with automatic rotation.
 
 It is intended for **authorized security research, penetration testing, security product evaluation, SEO tooling validation, deployment testing, and controlled system access** in environments where you have explicit permission to test.
 
@@ -10,7 +10,8 @@ It is intended for **authorized security research, penetration testing, security
 
 ## Features
 
-- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, and ProxyBroker2
+- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, Psiphon, and ProxyBroker2
+- **Psiphon egress** — Censorship-circumvention tunnel exposing a local HTTP/SOCKS proxy as an additional egress path
 - **Automatic VPN config refresh** — Downloads OpenVPN profiles from [VPNGate](http://www.vpngate.net/) on a schedule
 - **Connection rotation** — Watchdog reconnects VPN and proxy per container on a configurable interval (`ROTATING_DELAY`)
 - **Multiple egress paths** — Combine VPN, WARP, and scraped public proxies for diverse IP/geo testing
@@ -39,18 +40,18 @@ It is intended for **authorized security research, penetration testing, security
                     │  :10000 stats UI                     │
                     └──────────────┬──────────────────────┘
                                    │ round-robin
-         ┌─────────────────────────┼─────────────────────────┐
-         ▼                         ▼                         ▼
-   ┌───────────┐            ┌────────────┐           ┌──────────────┐
-   │   WARP    │            │ ProxyBroker│           │ ovpn_proxy   │
-   │  :1080    │            │  proxy001  │           │ 00 … 19      │
-   └───────────┘            │  :8888     │           │ OpenVPN +    │
-                            └────────────┘           │ tinyproxy    │
-                                                     │ :8080 each   │
-                                                     └──────┬───────┘
-                                                            │
-                     vpngate.py (master) ──► /ovpn/*.ovpn ◄─┘
-                     (refreshes configs every 30 min)
+    ┌────────────────────┬────────────┼────────────┬─────────────────────┐
+    ▼                    ▼            ▼            ▼                     ▼
+┌───────────┐    ┌────────────┐ ┌───────────┐ ┌────────────┐    ┌──────────────┐
+│   WARP    │    │ ProxyBroker│ │  Psiphon  │ │  (future)  │    │ ovpn_proxy   │
+│  :1080    │    │  proxy001  │ │ psiphon001│ │            │    │ 00 … 19      │
+└───────────┘    │  :8888     │ │  :8080    │ └────────────┘    │ OpenVPN +    │
+                 └────────────┘ └───────────┘                   │ tinyproxy    │
+                                                                │ :8080 each   │
+                                                                └──────┬───────┘
+                                                                       │
+                                vpngate.py (master) ──► /ovpn/*.ovpn ◄─┘
+                                (refreshes configs every 30 min)
 ```
 
 ### Components
@@ -60,6 +61,7 @@ It is intended for **authorized security research, penetration testing, security
 | `haproxy` | Front door; balances traffic across all backends |
 | `warp` | Cloudflare WARP SOCKS proxy |
 | `proxy001` | ProxyBroker2 — discovers and serves high-anonymity HTTP/HTTPS proxies |
+| `psiphon001` | Psiphon ConsoleClient — circumvention tunnel exposing a local HTTP proxy (`:8080`) / SOCKS proxy (`:1080`) |
 | `ovpn_proxy_00` … `ovpn_proxy_19` | OpenVPN client + tinyproxy; rotates VPN endpoint on watchdog schedule |
 | `restarter` | Periodically restarts `proxy001` to refresh the proxy pool |
 
@@ -86,7 +88,7 @@ It is intended for **authorized security research, penetration testing, security
 2. Create the shared OpenVPN config directory:
 
    ```bash
-   mkdir -p ovpn data
+   mkdir -p ovpn data psiphon_data
    ```
 
 3. Build and start the stack:
@@ -140,6 +142,36 @@ Duplicate or remove `ovpn_proxy_XX` service blocks in `docker-compose.yml` and a
 
 Optional `WARP_LICENSE_KEY` can be set on the `warp` service. See [caomingjun/warp](https://hub.docker.com/r/caomingjun/warp) for details.
 
+### Psiphon
+
+The `psiphon001` service builds the [Psiphon ConsoleClient](https://github.com/Psiphon-Labs/psiphon-tunnel-core) from source (`PsiphonDockerfile`) and runs it with the public Psiphon network config in `psiphon/psiphon.config`. It establishes a tunnel and exposes a local HTTP proxy on `:8080` (and SOCKS on `:1080`) that HAProxy chains to like any other backend.
+
+Tunable via `environment` on the service (all optional):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `EGRESS_REGION` | Pin egress country (e.g. `SG`, `JP`, `US`); empty = fastest/any | empty |
+| `DEVICE_REGION` | Client device region hint | empty |
+| `HTTP_PORT` | Local HTTP proxy port | `8080` |
+| `SOCKS_PORT` | Local SOCKS proxy port | `1080` |
+| `CONFIG_URL` | Auto-fetch a fresh config from this URL; empty = always use bundled standard config | empty |
+| `CONFIG_REFRESH_INTERVAL` | Seconds between config re-checks when `CONFIG_URL` is set (`0` = off) | `21600` |
+| `HEALTHCHECK_URL` | URL the healthcheck fetches *through* the proxy to prove egress | `https://www.google.com/generate_204` |
+
+Build a specific Psiphon version by overriding the `PSIPHON_VERSION` build arg in `PsiphonDockerfile`. Tunnel state persists in `./psiphon_data`.
+
+#### Self-healing / auto-updating config
+
+`psiphon/psiphon.config` is the bundled, read-only **standard** config. The runtime config the client actually uses is **rebuilt from a validated source on every start**, so:
+
+- **Auto-revert to standard** — if the runtime config in `./psiphon_data` is manually edited or corrupted, it is regenerated from the bundled standard config on the next (re)start. No manual cleanup needed.
+- **Auto-fetch newer config** — set `CONFIG_URL` to a JSON config endpoint. On start (and every `CONFIG_REFRESH_INTERVAL` seconds) the client downloads it, validates it's well-formed JSON with the required keys (`PropagationChannelId`, `SponsorId`, `RemoteServerListSignaturePublicKey`), and uses it. Any failure (unreachable, bad JSON, missing keys) **falls back to the bundled standard config**. When a newer config is detected, Psiphon is restarted (`restart: always`) to apply it.
+- **Note:** Psiphon already refreshes its *server list* automatically at runtime via the remote/obfuscated server-list URLs embedded in the config — so day-to-day server changes need no config update. `CONFIG_URL` is only needed for the rare case where the bootstrap parameters (channel/sponsor IDs, signature key) change.
+
+#### Healthcheck
+
+The container ships a Docker `HEALTHCHECK` that issues a request **through the local HTTP proxy** (not just a port check), so it only reports healthy once the tunnel can actually carry traffic. Inspect with `docker ps` (STATUS column) or `docker inspect --format '{{.State.Health.Status}}' psiphon001`.
+
 ---
 
 ## Project Layout
@@ -149,10 +181,15 @@ AutoGate/
 ├── docker-compose.yml      # Full stack definition
 ├── Dockerfile              # OpenVPN + tinyproxy slave image
 ├── HaproxyDockerfile       # HAProxy + vpngate fetcher
+├── PsiphonDockerfile       # Psiphon ConsoleClient build + runtime image
 ├── proxy/
 │   ├── haproxy.cfg         # Load balancer config
 │   ├── vpngate.py          # VPNGate OpenVPN config downloader
 │   └── run.sh              # HAProxy + periodic vpngate refresh
+├── psiphon/
+│   ├── psiphon.config      # Bundled standard Psiphon config (ports, server list)
+│   ├── run.sh              # Entrypoint: build/validate config + auto-update + launch
+│   └── healthcheck.sh      # Tunnel healthcheck (request through the proxy)
 ├── slave/
 │   ├── run.sh              # Slave entrypoint
 │   ├── ovpn.sh             # Random OpenVPN connect
@@ -160,6 +197,7 @@ AutoGate/
 │   ├── watchdog.sh         # Periodic VPN/proxy rotation
 │   └── tinyproxy.conf      # Tinyproxy settings
 ├── ovpn/                   # Shared OpenVPN configs (created at runtime)
+├── psiphon_data/           # Psiphon tunnel state (created at runtime)
 └── data/                   # WARP persistent data
 ```
 
@@ -180,6 +218,7 @@ AutoGate integrates with external and third-party components, including:
 
 - [VPNGate](http://www.vpngate.net/) — public VPN relay list (subject to their terms)
 - [Cloudflare WARP](https://www.cloudflare.com/warp/) — optional egress path
+- [Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — open-source censorship-circumvention tunnel (subject to their terms)
 - [ProxyBroker2](https://github.com/bluet/proxybroker2) — public proxy discovery
 - OpenVPN, HAProxy, tinyproxy — open-source software
 
