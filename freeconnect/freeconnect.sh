@@ -18,6 +18,11 @@ CSV="${FREECONNECT_CSV:-/data/freeconnect.csv}"
 UPSTREAM_PORT="${FREECONNECT_PORT:-9251}"
 LISTEN_PORT="${HTTP_PORT:-8080}"
 FILTER="${FREECONNECT_FILTER:-}"
+# Credentials are identical across every server in the list, so they can be set
+# once via env. When FREECONNECT_USER / FREECONNECT_PASS are empty, fall back to
+# the per-row values parsed from the CSV.
+ENV_USER="${FREECONNECT_USER:-}"
+ENV_PASS="${FREECONNECT_PASS:-}"
 
 if [ ! -f "$CSV" ]; then
     echo "ERROR: FreeConnect proxy list not found at $CSV"
@@ -43,8 +48,12 @@ host=$(echo "$line" | cut -d, -f1)
 user=$(echo "$line" | cut -d, -f2)
 pass=$(echo "$line" | cut -d, -f3)
 
+# Env-provided credentials override the per-row CSV values when set.
+[ -n "$ENV_USER" ] && user="$ENV_USER"
+[ -n "$ENV_PASS" ] && pass="$ENV_PASS"
+
 if [ -z "$host" ] || [ -z "$user" ] || [ -z "$pass" ]; then
-    echo "ERROR: could not parse a usable proxy entry from $CSV"
+    echo "ERROR: could not resolve a usable proxy entry (host/user/pass) from $CSV / env"
     exit 1
 fi
 

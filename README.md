@@ -230,6 +230,8 @@ Tunable via `environment` on the service (all optional):
 |----------|-------------|---------|
 | `ROTATING_DELAY` | Seconds between upstream rotations (re-picks a random proxy) | `60` |
 | `FREECONNECT_PORT` | Upstream proxy port — the CSV only lists domain/user/pass, so the port is set here | `9251` |
+| `FREECONNECT_USER` | Override the proxy username for every upstream; empty = use the per-row value from the CSV | empty |
+| `FREECONNECT_PASS` | Override the proxy password for every upstream; empty = use the per-row value from the CSV | empty |
 | `FREECONNECT_FILTER` | Keep only hosts whose domain matches this substring (e.g. `us0`, `nl`, `de`); empty = all | empty |
 | `HEALTHCHECK_URL` | URL the healthcheck fetches *through* the proxy to prove egress | `https://ifconfig.io/ip` |
 

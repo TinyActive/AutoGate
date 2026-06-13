@@ -153,6 +153,10 @@ services:
             # Upstream proxy port. The CSV only lists domain/user/pass; the
             # documented example uses 9251. Override here if it differs.
             - FREECONNECT_PORT=9251
+            # Credentials are identical for every server, so they can be set once
+            # here. Leave EMPTY to use the per-row user/pass from the CSV instead.
+            - FREECONNECT_USER=
+            - FREECONNECT_PASS=
             # Optional: keep only hosts whose domain matches this substring
             # (e.g. us0, nl, de). Empty = random across all listed proxies.
             - FREECONNECT_FILTER=
