@@ -1,0 +1,30 @@
+# Riseup VPN egress container for AutoGate.
+#
+# Riseup uses the open-source LEAP / Bitmask platform on top of OpenVPN, with a
+# public (no-account) API serving the CA cert, an anonymous client cert/key, and
+# the live gateway list. On start, riseup.sh fetches those, RANDOMLY selects one
+# gateway from Riseup's list, builds a single-remote OpenVPN profile, and brings
+# up tun0. tinyproxy then exposes it as an HTTP proxy that HAProxy chains to as
+# one more rotating egress path (same role as WARP / Psiphon / ProxyBroker2).
+
+FROM alpine
+EXPOSE 8080
+
+RUN apk --update add openvpn curl jq tinyproxy iproute2 grep ca-certificates \
+    && update-ca-certificates
+
+COPY riseup /riseup
+
+RUN find /riseup -name '*.sh' | xargs chmod +x
+
+# Rotation interval for the watchdog: kill OpenVPN/tinyproxy and re-select a new
+# random Riseup gateway every ROTATING_DELAY seconds.
+ENV ROTATING_DELAY=60
+
+# Tunnel establishment + bootstrap fetches can take a moment, so allow a
+# generous start period. The check tunnels a real request through tinyproxy to
+# confirm egress works (not just that the port is open).
+HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
+    CMD /riseup/healthcheck.sh
+
+CMD ["/riseup/run.sh"]

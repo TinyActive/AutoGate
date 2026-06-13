@@ -18,6 +18,7 @@ services:
             - warp:warp
             - proxy001:proxy001
             - psiphon001:psiphon001
+            - riseup001:riseup001
             - ovpn_proxy_00:vpn00
             - ovpn_proxy_01:vpn01
             - ovpn_proxy_02:vpn02
@@ -96,6 +97,41 @@ services:
         networks:
             custom_network:
                 ipv4_address: 172.21.0.132
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10m"
+                max-file: "1"
+
+    riseup001:
+        build:
+            context: .
+            dockerfile: RiseupDockerfile
+        image: riseupimg
+        container_name: riseup001
+        hostname: riseup001
+        restart: always
+        cap_add:
+            - NET_ADMIN
+        devices:
+            - /dev/net/tun
+        dns:
+            - 1.1.1.1
+        environment:
+            # Seconds between gateway rotations (re-picks a random Riseup server).
+            - ROTATING_DELAY=360
+            # Optional: pin egress location (e.g. Paris, Amsterdam, Seattle).
+            # Empty = random across all advertised Riseup gateways.
+            - RISEUP_LOCATION=
+            # OpenVPN transport protocol to prefer: udp (default) or tcp.
+            - RISEUP_PROTO=udp
+            # URL the healthcheck fetches THROUGH the proxy to prove egress.
+            - HEALTHCHECK_URL=https://www.google.com/generate_204
+        volumes:
+            - ./riseup_data:/riseup/data
+        networks:
+            custom_network:
+                ipv4_address: 172.21.0.133
         logging:
             driver: "json-file"
             options:

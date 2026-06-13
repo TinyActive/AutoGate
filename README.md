@@ -1,6 +1,6 @@
 # AutoGate
 
-AutoGate is a Docker-based **rotating proxy gateway** that aggregates multiple outbound paths—VPN (OpenVPN via VPNGate), Cloudflare WARP, Psiphon, and public HTTP/HTTPS proxies—and exposes them through a single HAProxy entry point with automatic rotation.
+AutoGate is a Docker-based **rotating proxy gateway** that aggregates multiple outbound paths—VPN (OpenVPN via VPNGate), Riseup VPN, Cloudflare WARP, Psiphon, and public HTTP/HTTPS proxies—and exposes them through a single HAProxy entry point with automatic rotation.
 
 It is intended for **authorized security research, penetration testing, security product evaluation, SEO tooling validation, deployment testing, and controlled system access** in environments where you have explicit permission to test.
 
@@ -10,8 +10,9 @@ It is intended for **authorized security research, penetration testing, security
 
 ## Features
 
-- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, Psiphon, and ProxyBroker2
+- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, Psiphon, Riseup VPN, and ProxyBroker2
 - **Psiphon egress** — Censorship-circumvention tunnel exposing a local HTTP/SOCKS proxy as an additional egress path
+- **Riseup VPN egress** — LEAP/Bitmask OpenVPN tunnel with **random gateway selection** from Riseup's live server list, exposed as an HTTP proxy
 - **Automatic VPN config refresh** — Downloads OpenVPN profiles from [VPNGate](http://www.vpngate.net/) on a schedule
 - **Connection rotation** — Watchdog reconnects VPN and proxy per container on a configurable interval (`ROTATING_DELAY`)
 - **Multiple egress paths** — Combine VPN, WARP, and scraped public proxies for diverse IP/geo testing
@@ -43,14 +44,16 @@ It is intended for **authorized security research, penetration testing, security
     ┌────────────────────┬────────────┼────────────┬─────────────────────┐
     ▼                    ▼            ▼            ▼                     ▼
 ┌───────────┐    ┌────────────┐ ┌───────────┐ ┌────────────┐    ┌──────────────┐
-│   WARP    │    │ ProxyBroker│ │  Psiphon  │ │  (future)  │    │ ovpn_proxy   │
-│  :1080    │    │  proxy001  │ │ psiphon001│ │            │    │ 00 … 19      │
-└───────────┘    │  :8888     │ │  :8080    │ └────────────┘    │ OpenVPN +    │
-                 └────────────┘ └───────────┘                   │ tinyproxy    │
-                                                                │ :8080 each   │
-                                                                └──────┬───────┘
-                                                                       │
-                                vpngate.py (master) ──► /ovpn/*.ovpn ◄─┘
+│   WARP    │    │ ProxyBroker│ │  Psiphon  │ │  Riseup VPN│    │ ovpn_proxy   │
+│  :1080    │    │  proxy001  │ │ psiphon001│ │ riseup001  │    │ 00 … 19      │
+└───────────┘    │  :8888     │ │  :8080    │ │  :8080     │    │ OpenVPN +    │
+                 └────────────┘ └───────────┘ │ OpenVPN +  │    │ tinyproxy    │
+                                               │ tinyproxy  │    │ :8080 each   │
+                                               │ random GW  │    └──────┬───────┘
+                                               └─────┬──────┘           │
+                                                     │                  │
+            api.black.riseup.net (gateway list) ─────┘                  │
+                                vpngate.py (master) ──► /ovpn/*.ovpn ◄───┘
                                 (refreshes configs every 30 min)
 ```
 
@@ -62,6 +65,7 @@ It is intended for **authorized security research, penetration testing, security
 | `warp` | Cloudflare WARP SOCKS proxy |
 | `proxy001` | ProxyBroker2 — discovers and serves high-anonymity HTTP/HTTPS proxies |
 | `psiphon001` | Psiphon ConsoleClient — circumvention tunnel exposing a local HTTP proxy (`:8080`) / SOCKS proxy (`:1080`) |
+| `riseup001` | Riseup VPN (LEAP/Bitmask OpenVPN) client + tinyproxy; **randomly selects a gateway** from Riseup's live server list and rotates on watchdog schedule (`:8080`) |
 | `ovpn_proxy_00` … `ovpn_proxy_19` | OpenVPN client + tinyproxy; rotates VPN endpoint on watchdog schedule |
 | `restarter` | Periodically restarts `proxy001` to refresh the proxy pool |
 
@@ -88,7 +92,7 @@ It is intended for **authorized security research, penetration testing, security
 2. Create the shared OpenVPN config directory:
 
    ```bash
-   mkdir -p ovpn data psiphon_data
+   mkdir -p ovpn data psiphon_data riseup_data
    ```
 
 3. Build and start the stack:
@@ -172,6 +176,33 @@ Build a specific Psiphon version by overriding the `PSIPHON_VERSION` build arg i
 
 The container ships a Docker `HEALTHCHECK` that issues a request **through the local HTTP proxy** (not just a port check), so it only reports healthy once the tunnel can actually carry traffic. Inspect with `docker ps` (STATUS column) or `docker inspect --format '{{.State.Health.Status}}' psiphon001`.
 
+### Riseup VPN
+
+The `riseup001` service builds an Alpine + OpenVPN image (`RiseupDockerfile`) that connects to [Riseup VPN](https://riseup.net/en/vpn) — a free, no-account VPN built on the open-source [LEAP/Bitmask](https://0xacab.org/leap/bitmask-vpn) platform. It behaves like the `ovpn_proxy_*` slaves (OpenVPN + tinyproxy on `:8080`), but instead of VPNGate profiles it bootstraps everything at runtime directly from Riseup's public API.
+
+On every (re)start, `riseup/riseup.sh`:
+
+1. Fetches the **VPN CA cert** (`https://black.riseup.net/ca.crt`).
+2. Fetches an **anonymous client cert + key** (`https://api.black.riseup.net/3/cert`) — no account or login needed (valid ~90 days, re-fetched on each rotation).
+3. Fetches the **live gateway list** (`https://api.black.riseup.net/3/config/eip-service.json`).
+4. **Randomly selects one server** from that list with `shuf` (the required random-selection step), honouring the optional `RISEUP_LOCATION` / `RISEUP_PROTO` filters.
+5. Builds a single-remote OpenVPN profile (cipher/auth mirror Riseup's published `openvpn_configuration`) and connects; `tinyproxy` then binds to `tun0` and exposes `:8080` for HAProxy.
+
+The watchdog re-runs this flow every `ROTATING_DELAY` seconds, so each rotation lands on a **freshly randomized Riseup gateway**.
+
+Tunable via `environment` on the service (all optional):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ROTATING_DELAY` | Seconds between gateway rotations (re-picks a random server) | `60` |
+| `RISEUP_LOCATION` | Pin egress location (e.g. `Paris`, `Amsterdam`, `Seattle`); empty = random across all gateways | empty |
+| `RISEUP_PROTO` | OpenVPN transport to prefer: `udp` or `tcp` | `udp` |
+| `HEALTHCHECK_URL` | URL the healthcheck fetches *through* the proxy to prove egress | `https://www.google.com/generate_204` |
+
+If the requested `RISEUP_LOCATION`/`RISEUP_PROTO` combination matches no gateway, the filters are dropped and a random gateway is chosen from the full list. Bootstrap artifacts are cached in `./riseup_data`, so a brief API outage falls back to the last-known cert/CA/gateway list. Like Psiphon, the container's `HEALTHCHECK` proves egress by tunneling a real request through the proxy.
+
+> **Note:** Riseup gateways are a shared community resource. Use responsibly and within [Riseup's terms](https://riseup.net/en/about-us/policy).
+
 ---
 
 ## Project Layout
@@ -182,6 +213,7 @@ AutoGate/
 ├── Dockerfile              # OpenVPN + tinyproxy slave image
 ├── HaproxyDockerfile       # HAProxy + vpngate fetcher
 ├── PsiphonDockerfile       # Psiphon ConsoleClient build + runtime image
+├── RiseupDockerfile        # Riseup VPN (LEAP/Bitmask OpenVPN) + tinyproxy image
 ├── proxy/
 │   ├── haproxy.cfg         # Load balancer config
 │   ├── vpngate.py          # VPNGate OpenVPN config downloader
@@ -190,6 +222,13 @@ AutoGate/
 │   ├── psiphon.config      # Bundled standard Psiphon config (ports, server list)
 │   ├── run.sh              # Entrypoint: build/validate config + auto-update + launch
 │   └── healthcheck.sh      # Tunnel healthcheck (request through the proxy)
+├── riseup/
+│   ├── riseup.sh           # Fetch CA/cert/gateways + RANDOM gateway selection + OpenVPN connect
+│   ├── run.sh              # Entrypoint: launch tunnel + tinyproxy + watchdog
+│   ├── tinyproxy.sh        # HTTP proxy bound to tun0
+│   ├── watchdog.sh         # Periodic rotation to a new random Riseup gateway
+│   ├── healthcheck.sh      # Egress healthcheck (request through the proxy)
+│   └── tinyproxy.conf      # Tinyproxy settings
 ├── slave/
 │   ├── run.sh              # Slave entrypoint
 │   ├── ovpn.sh             # Random OpenVPN connect
@@ -198,6 +237,7 @@ AutoGate/
 │   └── tinyproxy.conf      # Tinyproxy settings
 ├── ovpn/                   # Shared OpenVPN configs (created at runtime)
 ├── psiphon_data/           # Psiphon tunnel state (created at runtime)
+├── riseup_data/            # Riseup CA/cert/gateway cache (created at runtime)
 └── data/                   # WARP persistent data
 ```
 
@@ -219,6 +259,7 @@ AutoGate integrates with external and third-party components, including:
 - [VPNGate](http://www.vpngate.net/) — public VPN relay list (subject to their terms)
 - [Cloudflare WARP](https://www.cloudflare.com/warp/) — optional egress path
 - [Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — open-source censorship-circumvention tunnel (subject to their terms)
+- [Riseup VPN](https://riseup.net/en/vpn) / [LEAP Bitmask](https://0xacab.org/leap/bitmask-vpn) — free community VPN (subject to [Riseup's terms](https://riseup.net/en/about-us/policy))
 - [ProxyBroker2](https://github.com/bluet/proxybroker2) — public proxy discovery
 - OpenVPN, HAProxy, tinyproxy — open-source software
 
