@@ -1,0 +1,43 @@
+# FreeConnect HTTPS-proxy egress container for AutoGate.
+#
+# The freeconnect.link endpoints are HTTPS proxies (HTTP CONNECT over TLS,
+# addressed by domain, with Basic auth), e.g.:
+#
+#   curl -x https://freeuser1:freeuser1@nl194.freeconnect.link:9251 https://ifconfig.io
+#
+# HAProxy can't originate that upstream-HTTPS-proxy chain itself, so this image
+# runs gost as a local plain HTTP proxy on :8080 that forwards to a randomly
+# selected upstream FreeConnect proxy over TLS. HAProxy then chains to :8080 as
+# one more rotating egress path (same role as WARP / Psiphon / Riseup).
+
+FROM alpine:3.20
+EXPOSE 8080
+
+ARG GOST_VERSION=2.11.5
+
+RUN apk --no-cache add ca-certificates curl coreutils \
+    && update-ca-certificates
+
+# gost (GO Simple Tunnel) v2 static binary: speaks "HTTPS proxy" upstream chains
+# (the `-F https://...` connector = HTTP proxy over TLS, i.e. curl's `-x https`).
+RUN curl -sSL "https://github.com/ginuerzh/gost/releases/download/v${GOST_VERSION}/gost-linux-amd64-${GOST_VERSION}.gz" \
+    | gunzip > /usr/local/bin/gost \
+    && chmod +x /usr/local/bin/gost
+
+COPY freeconnect /freeconnect
+RUN find /freeconnect -name '*.sh' | xargs chmod +x
+
+# Rotation interval for the watchdog: kill gost and re-select a new random
+# FreeConnect upstream every ROTATING_DELAY seconds.
+ENV ROTATING_DELAY=60
+# Upstream proxy port (the CSV only lists domain/user/pass). Override if the
+# provider uses a different port than the documented example (9251).
+ENV FREECONNECT_PORT=9251
+
+# Establishing the upstream TLS proxy chain is fast, but allow a start period so
+# transient upstream errors don't immediately mark the container unhealthy. The
+# check tunnels a real request through gost to confirm egress works.
+HEALTHCHECK --interval=30s --timeout=15s --start-period=30s --retries=3 \
+    CMD /freeconnect/healthcheck.sh
+
+CMD ["/freeconnect/run.sh"]

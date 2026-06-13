@@ -19,6 +19,7 @@ services:
             - proxy001:proxy001
             - psiphon001:psiphon001
             - riseup001:riseup001
+            - freeconnect001:freeconnect001
             - ovpn_proxy_00:vpn00
             - ovpn_proxy_01:vpn01
             - ovpn_proxy_02:vpn02
@@ -132,6 +133,37 @@ services:
         networks:
             custom_network:
                 ipv4_address: 172.21.0.133
+        logging:
+            driver: "json-file"
+            options:
+                max-size: "10m"
+                max-file: "1"
+
+    freeconnect001:
+        build:
+            context: .
+            dockerfile: FreeconnectDockerfile
+        image: freeconnectimg
+        container_name: freeconnect001
+        hostname: freeconnect001
+        restart: always
+        environment:
+            # Seconds between upstream rotations (re-picks a random FreeConnect proxy).
+            - ROTATING_DELAY=360
+            # Upstream proxy port. The CSV only lists domain/user/pass; the
+            # documented example uses 9251. Override here if it differs.
+            - FREECONNECT_PORT=9251
+            # Optional: keep only hosts whose domain matches this substring
+            # (e.g. us0, nl, de). Empty = random across all listed proxies.
+            - FREECONNECT_FILTER=
+            # URL the healthcheck fetches THROUGH the proxy to prove egress.
+            - HEALTHCHECK_URL=https://ifconfig.io/ip
+        volumes:
+            # Mount the proxy list read-only so it can be updated without rebuild.
+            - ./data:/data:ro
+        networks:
+            custom_network:
+                ipv4_address: 172.21.0.134
         logging:
             driver: "json-file"
             options:

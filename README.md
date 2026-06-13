@@ -10,7 +10,8 @@ It is intended for **authorized security research, penetration testing, security
 
 ## Features
 
-- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, Psiphon, Riseup VPN, and ProxyBroker2
+- **Rotating proxy pool** — HAProxy round-robin across 20+ OpenVPN-backed tinyproxy instances, WARP, Psiphon, Riseup VPN, FreeConnect HTTPS proxies, and ProxyBroker2
+- **FreeConnect egress** — Chains to upstream **HTTPS proxies** (CONNECT-over-TLS, domain + auth) from a CSV list via gost, with random rotation
 - **Psiphon egress** — Censorship-circumvention tunnel exposing a local HTTP/SOCKS proxy as an additional egress path
 - **Riseup VPN egress** — LEAP/Bitmask OpenVPN tunnel with **random gateway selection** from Riseup's live server list, exposed as an HTTP proxy
 - **Automatic VPN config refresh** — Downloads OpenVPN profiles from [VPNGate](http://www.vpngate.net/) on a schedule
@@ -66,6 +67,7 @@ It is intended for **authorized security research, penetration testing, security
 | `proxy001` | ProxyBroker2 — discovers and serves high-anonymity HTTP/HTTPS proxies |
 | `psiphon001` | Psiphon ConsoleClient — circumvention tunnel exposing a local HTTP proxy (`:8080`) / SOCKS proxy (`:1080`) |
 | `riseup001` | Riseup VPN (LEAP/Bitmask OpenVPN) client + tinyproxy; **randomly selects a gateway** from Riseup's live server list and rotates on watchdog schedule (`:8080`) |
+| `freeconnect001` | gost chained to a FreeConnect **HTTPS proxy** (CONNECT-over-TLS, domain + Basic auth); **randomly selects an upstream** from `data/freeconnect.csv` and rotates on watchdog schedule, exposed as a local HTTP proxy (`:8080`) |
 | `ovpn_proxy_00` … `ovpn_proxy_19` | OpenVPN client + tinyproxy; rotates VPN endpoint on watchdog schedule |
 | `restarter` | Periodically restarts `proxy001` to refresh the proxy pool |
 
@@ -203,6 +205,36 @@ If the requested `RISEUP_LOCATION`/`RISEUP_PROTO` combination matches no gateway
 
 > **Note:** Riseup gateways are a shared community resource. Use responsibly and within [Riseup's terms](https://riseup.net/en/about-us/policy).
 
+### FreeConnect HTTPS proxies
+
+The `freeconnect001` service turns the upstream **HTTPS proxies** listed in `data/freeconnect.csv` into one more rotating egress path. These endpoints are not plain HTTP proxies — the client must speak HTTP `CONNECT` **over TLS**, addressing the proxy by its **domain name** (the TLS certificate is issued for that domain) with HTTP Basic auth, exactly like:
+
+```bash
+curl -x https://freeuser1:freeuser1@nl194.freeconnect.link:9251 https://ifconfig.io
+```
+
+HAProxy can't originate that upstream-HTTPS-proxy chain itself, so the container runs [**gost**](https://github.com/ginuerzh/gost) as a local plain HTTP proxy on `:8080` and forwards everything to the selected upstream over TLS (`gost -L http://:8080 -F https://user:pass@host:PORT`). HAProxy then chains to `:8080` like any other backend.
+
+On every (re)start, `freeconnect/freeconnect.sh`:
+
+1. Reads the mounted `data/freeconnect.csv` (skipping the header, stripping CRLF).
+2. Optionally filters hosts by `FREECONNECT_FILTER` (domain substring).
+3. **Randomly selects one upstream** with `shuf`.
+4. Builds `https://<user>:<pass>@<host>:<FREECONNECT_PORT>` and launches gost.
+
+The watchdog re-runs this flow every `ROTATING_DELAY` seconds, so each rotation lands on a **freshly randomized FreeConnect proxy**.
+
+Tunable via `environment` on the service (all optional):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ROTATING_DELAY` | Seconds between upstream rotations (re-picks a random proxy) | `60` |
+| `FREECONNECT_PORT` | Upstream proxy port — the CSV only lists domain/user/pass, so the port is set here | `9251` |
+| `FREECONNECT_FILTER` | Keep only hosts whose domain matches this substring (e.g. `us0`, `nl`, `de`); empty = all | empty |
+| `HEALTHCHECK_URL` | URL the healthcheck fetches *through* the proxy to prove egress | `https://ifconfig.io/ip` |
+
+> **Note:** The CSV does not contain ports. `FREECONNECT_PORT` defaults to `9251` (from the documented `curl` example); set it to the port your provider actually serves. Update `data/freeconnect.csv` and the change is picked up on the next rotation (the file is mounted read-only, no rebuild needed). Scale by duplicating the `freeconnect001` service block (e.g. `freeconnect002`) and adding a matching `server freeconnectXXX freeconnectXXX:8080 check` line in `proxy/haproxy.cfg`.
+
 ---
 
 ## Project Layout
@@ -214,6 +246,7 @@ AutoGate/
 ├── HaproxyDockerfile       # HAProxy + vpngate fetcher
 ├── PsiphonDockerfile       # Psiphon ConsoleClient build + runtime image
 ├── RiseupDockerfile        # Riseup VPN (LEAP/Bitmask OpenVPN) + tinyproxy image
+├── FreeconnectDockerfile   # FreeConnect HTTPS-proxy egress (gost) image
 ├── proxy/
 │   ├── haproxy.cfg         # Load balancer config
 │   ├── vpngate.py          # VPNGate OpenVPN config downloader
@@ -229,6 +262,11 @@ AutoGate/
 │   ├── watchdog.sh         # Periodic rotation to a new random Riseup gateway
 │   ├── healthcheck.sh      # Egress healthcheck (request through the proxy)
 │   └── tinyproxy.conf      # Tinyproxy settings
+├── freeconnect/
+│   ├── freeconnect.sh      # Pick a RANDOM upstream HTTPS proxy from CSV + launch gost
+│   ├── run.sh              # Entrypoint: launch gost chain + watchdog
+│   ├── watchdog.sh         # Periodic rotation to a new random upstream
+│   └── healthcheck.sh      # Egress healthcheck (request through the proxy)
 ├── slave/
 │   ├── run.sh              # Slave entrypoint
 │   ├── ovpn.sh             # Random OpenVPN connect
@@ -238,7 +276,7 @@ AutoGate/
 ├── ovpn/                   # Shared OpenVPN configs (created at runtime)
 ├── psiphon_data/           # Psiphon tunnel state (created at runtime)
 ├── riseup_data/            # Riseup CA/cert/gateway cache (created at runtime)
-└── data/                   # WARP persistent data
+└── data/                   # WARP persistent data + freeconnect.csv (HTTPS proxy list)
 ```
 
 ---
@@ -261,6 +299,8 @@ AutoGate integrates with external and third-party components, including:
 - [Psiphon](https://github.com/Psiphon-Labs/psiphon-tunnel-core) — open-source censorship-circumvention tunnel (subject to their terms)
 - [Riseup VPN](https://riseup.net/en/vpn) / [LEAP Bitmask](https://0xacab.org/leap/bitmask-vpn) — free community VPN (subject to [Riseup's terms](https://riseup.net/en/about-us/policy))
 - [ProxyBroker2](https://github.com/bluet/proxybroker2) — public proxy discovery
+- [gost](https://github.com/ginuerzh/gost) — GO Simple Tunnel; chains to upstream HTTPS proxies (FreeConnect egress)
+- FreeConnect — third-party HTTPS proxy provider (subject to their terms); credentials/endpoints in `data/freeconnect.csv`
 - OpenVPN, HAProxy, tinyproxy — open-source software
 
 You are responsible for complying with the terms of all upstream services and applicable laws.
