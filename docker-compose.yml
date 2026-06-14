@@ -156,7 +156,7 @@ services:
             # Credentials are identical for every server, so they can be set once
             # here. Leave EMPTY to use the per-row user/pass from the CSV instead.
             - FREECONNECT_USER=
-            - FREECONNECT_PASS=
+            - FREECONNECT_PASS= c
             # Optional: keep only hosts whose domain matches this substring
             # (e.g. us0, nl, de). Empty = random across all listed proxies.
             - FREECONNECT_FILTER=
